@@ -1,0 +1,106 @@
+---
+title: 'POP77022: Programming Exercise 1'
+author: "Your Name"
+date: "Today's date"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+The first homework assignment will cover concepts and methods from Weeks 1 & 2 (basic string operations, corpus acquisition, text processing, textual statistics, dictionary methods).  You are expected to provide your answers as embedded R code and/or text answers in the chunks provided in the homework RMarkdown file. 
+
+For example:
+
+```{r}
+print("Print R code in code chunk.")
+```
+
+Describe results and provide answers to conceptual and open-ended questions
+in a plain code block like this one.
+```
+
+__The programming exercise is worth 20% of your total grade.  The questions sum to 100 points.__
+
+## Analysis of tweets during a political crisis
+
+We will start with a dataset that contains almost 900 tweets that were published by four central figures in American politics around the time of the onset of an impeachment inquiry: Pres. Donald Trump, Rudy Giuliani, Speaker of the House Rep. Nancy Pelosi, and Chair of the House Intelligence Committee Rep. Adam Schiff.  
+
+The first step will be to read the spreadsheet of tweets into R and then use the `str` and `head` functions to describe the variables and contents of the dataset.  For your convenience, I will provide code to import the spreadsheet (*Hint: be sure that the data folder is in the same folder as this homework RMarkdown file.*)
+
+```{r}
+setwd(getwd())
+data <- read.csv("./data/us_tweets.csv", 
+                 stringsAsFactors=FALSE,
+                 encoding = "utf-8")
+
+```
+
+### Question 1.0 (2 points)
+
+Print the number of tweets that are in this dataset.
+
+```{r}
+# Insert code here
+```
+
+
+### Question 1.1 (3 points)
+
+Create a new dataframe that only includes original tweets (remove retweets) and print the number of rows.
+
+```{r}
+# Insert code here
+```
+
+### Question 1.2 (20 points)
+
+Create a smaller dataframe that only includes tweets by Donald Trump.
+
+* Print how many tweets by Trump are contained in the dataset?
+
+For the following print the number of instances as well as an example tweet:
+
+* How many tweets include an exclamation mark?  
+* In how many tweets did Trump mention words related to "winning"?
+* "employment"?
+* "immigration"?
+* "hoax"?
+
+Make sure that you support your answers with code.
+
+(*Hints: be sure to use regular expressions when searching the tweets; also you might want to wrap your search term in between word anchor boundaries (`\\b`).  For instance, for the term health: `"\\bhealth\\b"`*)
+
+```{r}
+# Insert code here
+
+```
+
+
+### Question 2 (75 points)
+
+Create a `corpus` and a `dfm` object with processed text (including collocations) using the dataframe generated in Question 1.1.  With the generated `dfm` object perform the following tasks:
+
+1. Create a frequency plot of the top 30 tokens for each politician.
+1. Determine the "key" terms that Trump and Pelosi are more likely to tweet.  Plot your results
+1. Perform a keyword in context analysis using your `corpus` object for some of the most distinct keywords from both Trump and Pelosi. *Hint: remember to use the `phrase` function in the `pattern` argument of `kwic`*
+1. Conduct a sentiment analysis of Trump's tweets using the Lexicon Sentiment Dictionary.  Plot net sentiment over the entire sample period. Interpret the results.  *Hint: you might want to use `lubridate` to generate a date object variable from the "created_at" variable before plotting.  For example: `docvars(dfm, "date") <- lubridate::ymd_hms(dfm@docvars$created_at)` *
+1. Justify each of your text processing decisions and interpret your results in the text field below. What can we learn about the political communication surrounding the political crisis based on the results from the above tasks?
+
+```{r}
+library(quanteda)
+
+# Insert code here
+
+```
+
+```
+<Insert open-ended response here>
+```
+
+
+
+
