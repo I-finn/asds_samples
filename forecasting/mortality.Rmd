@@ -1,0 +1,694 @@
+---
+title: 'POP77014: Assignment 2'
+author: "Imelda Finn (22334657)"
+date: "08/04/2023"
+output:
+  pdf_document: default
+
+lang: "utf-8"
+df_print: tibble
+theme: united
+highlight: espresso
+bibliography: bib/final.bib
+nocite: | 
+  @shmueli2016practical
+  @cd2bda32-en
+  @fpp3
+  @lilBook
+  @modeltime
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#####################
+# Imelda Finn
+# 22334657
+# Social Forecasting
+# POP77014
+#####################
+#output: pdf_document
+#lang: utf-8
+#df_print: tibble
+
+#output: html_document
+
+#        toc: true
+#        toc_depth: 2
+#        number_sections: true
+#        theme: united
+#        highlight: espresso
+
+rm(list=ls())
+
+```
+```{r functions, message=FALSE, eval=TRUE, include=FALSE}
+# detach all libraries
+detachAllPackages <- function() {
+  basic.packages <- c("package:stats", "package:graphics", "package:grDevices", "package:utils", "package:datasets", "package:methods", "package:base")
+  package.list <- search()[ifelse(unlist(gregexpr("package:", search()))==1, TRUE, FALSE)]
+  package.list <- setdiff(package.list, basic.packages)
+  if (length(package.list)>0)  for (package in package.list) detach(package,  character.only=TRUE)
+}
+detachAllPackages()
+
+# load libraries
+pkgTest <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[,  "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg,  dependencies = TRUE)
+  sapply(pkg,  require,  character.only = TRUE)
+}
+# patchwork plots
+stackPlot <- function(x) Reduce("/", x)
+
+```
+```{r libraries, message=FALSE, eval=TRUE, include=FALSE}
+
+#genl
+lapply(c("ggplot2", "tidyverse",  "lubridate", "here", "patchwork"),  pkgTest)
+#specific
+lapply(c("zoo", "fpp2", "ISOweek","tsfeatures"),  pkgTest)
+# ensemble
+lapply(c("xgboost", "tidymodels", "modeltime", "modeltime.ensemble","timetk","forecast"),  pkgTest)
+
+```
+## Overview
+This report analyses the evolution of all cause mortality in the USA 2015-2023. 
+
+1. The data is from the OECD website: COVID-19 Health Indicators, Mortality (by week)[@cd2bda32-en]
+
+Mortality rates have been generally decreasing over time, i.e. life expectancy has been rising.  (This may not continue in the future, particularly in developed nations, as lifestyle factors such as obesity may tend to reduce inter-generational life expectancy.)
+
+In a stable population (where births/migration replace deaths), mortality rates will be gradually reducing, as life expectancy causes fewer deaths at each age.
+In an expanding population, average age is decreasing so mortality rates reduce faster.  In a contracting population, the average age is increasing as deaths are not balanced by births or inward (younger) migrants, so mortality rates will be steady or even rising (temporarily).
+
+COVID-19 started in 2019, the first deaths in America were in 2020; this will distort the mortality predictions for 2021 and beyond.  Some models may be better at capturing what happened, and so might be more useful in future pandemics.
+
+<br>
+Final Model: ensemble - mean of 7 models
+
+
+
+- HoltWinters with high $\alpha$ (=0.94), quickly takes surge in mortality in 2020 into account 
+
+``if you want to make prediction intervals for forecasts made using exponential smoothing methods, the prediction intervals require that the forecast errors are uncorrelated and are normally distributed with mean zero and constant variance.'' [@lilBook]  Assumption doesn't hold with this data
+
+<br>
+3. If relevant, all estimated equations associated with constructing forecasts from this method
+
+<br>
+4. Report the MAPE and MAE for the training period and the validation period. You may also report other metrics if relevant.
+
+<br>
+6. A single figure showing the fit of the final version of the model to the entire period available in the data (i.e., in-sample fit. For options 1 and 2, you do not have access to the "future" data). 
+
+Note that the figure may include subfigures but all must fit in a
+single panel. 
+Presentation matters, so make sure your plots are easy to understand and
+convey the information as effectively as possible.
+Total word limit (all included): 1,500. NB: this is a maximum, not a target.
+
+
+```{r options, message=FALSE, eval=TRUE, include=FALSE}
+# settings
+# set wd for current folder
+setwd(here())
+
+theme_set(theme_minimal())
+
+```
+
+```{r getData, echo=TRUE}
+# read in the data
+# show_col_types = FALSE
+
+#https://stats.oecd.org/Index.aspx?DataSetCode=HEALTH_MORTALITY
+mort <- read_csv("data/HEALTH_MORTALITY_all.csv")
+
+mort$date <- ISOweek2date(paste0(mort$YEAR, "-W", sprintf("%02d", mort$WEEK),"-4"))
+mort <- mort %>% 
+  filter(Age == "Total" & Gender == "Total"  & VARIABLE == "ALLCAUNB") %>%
+  arrange(desc(COUNTRY), date)
+
+#summary(mort)
+#unique(mort$COUNTRY)
+
+mort %>% ggplot(aes(x=date, y=Value, colour = COUNTRY)) + geom_line() +
+  ylab("Deaths (all cause)")
+
+```
+
+```{r getCountryData, echo=TRUE}
+
+country_code <- "USA"
+country <- mort %>% filter(COUNTRY == country_code) %>% select(date, Value)
+country %>% arrange(date)
+length(country$date)
+min(country$date)
+
+# first week in data  is 1, 2015
+# 2020 has 53 weeks
+
+# set the parameters for the time series
+startDate <- min(country$date)
+startYear <- year(startDate)
+startMonth <- month(startDate)
+startWeek <- week(startDate)
+startDay <- day(startDate)
+
+endDate <- max(country$date)
+endYear <- year(endDate)
+endMonth <- month(endDate)
+endWeek <- week(endDate)
+
+# specify the forecasting parameters
+# solve for recommended
+# look for smaller alphas to smooth out effect of pandemic
+ALPHA <-  0.95
+FREQ<- 52
+WEEKS <- length(country$Value)
+
+future <- as.integer(WEEKS*0.2)   # 85 for full data
+
+fivenum(country$Value)
+
+# default graph labels
+mtitle <- paste0(country_code," all causes deaths (weekly)")
+stitle <- paste0(startMonth, "/", startYear, " - ", endMonth, "/",endYear)
+y_lab <- "Deaths"
+x_lab <- "Year"
+us_y_lim <- c(48000, 90000)     # check when incorporate leap year
+y_lim <- us_y_lim
+x_lim <- c(startDate, endDate)
+
+```
+ 
+Data is weekly, `r WEEKS` weeks from `r startDate` to `r endDate` inclusive.
+
+```{r makeTS, eval=TRUE, include=TRUE}
+#Convert the death numbers to a time series
+country.ts <- ts(country$Value, start=c(startYear,startWeek), frequency=FREQ)
+
+print(tsfeatures(country.ts))
+summary(country.ts)
+head(tail(country,85),1)  #2021-07-15  # first week of test set
+
+```
+```{r plotTS, eval=TRUE}
+# plot the whole time series
+autoplot(country.ts) + 
+  ggtitle(mtitle, subtitle = stitle) +
+  xlab(x_lab) +
+  ylab(y_lab)
+
+```
+
+```{r makeTrain, eval=TRUE, include=TRUE}
+nValid <- future
+nTrain <- length(country.ts) - nValid
+train.ts <- window(country.ts, start = c(startYear, startWeek), 
+                   end = c(startYear, nTrain))
+valid.ts <- window(country.ts, start = c(startYear, nTrain+1), 
+                   end = c(startYear, nTrain+nValid))
+
+```
+
+Consider the timeseries decomposition: seasonal component; the trend; and the remainder.
+
+```{r decomposition, eval=TRUE, include=TRUE}
+#plot the decomposition
+(country.stl <- country.ts %>%
+  stl(s.window="periodic"))%>%
+  autoplot() +
+  ggtitle(mtitle, subtitle = stitle) +
+  xlab(x_lab) +
+  ylab(y_lab)
+
+```
+value of time series at time t = $y_t = T_t + S_t + R_t$
+
+```{r ensemble, eval=TRUE, include=TRUE}
+
+# This toggles plots from plotly (interactive) to ggplot (static)
+interactive <- FALSE
+
+#country %>% plot_time_series(date, Value, .interactive = interactive)
+
+FREQ<- 52
+WEEKS <- length(country$Value)
+
+future <- as.integer(WEEKS*0.2)
+dlimit <- head(tail(country,future),1)$date
+
+nTrain <- length(country$date) - future
+train <- country %>% select(Value, date) %>% filter(date < dlimit)
+valid <- country %>% select(Value, date) %>% filter(date >= dlimit)
+
+# Split Data 80/20
+splits <- initial_time_split(train, prop = 0.8)
+
+# Model 1: auto_arima ----
+model_fit_arima_no_boost <- arima_reg() %>%
+  set_engine(engine = "auto_arima") %>%
+  fit(Value ~ date, data = training(splits))
+
+# Model 1b: auto_arima ----   ARIMA(3,1,0)(0,0,2)[52] 
+model_fit_arima_52 <- arima_reg(seasonal_period = 52,
+        non_seasonal_ar = 3, non_seasonal_differences = 1,
+        non_seasonal_ma = 0, seasonal_ar = 0, seasonal_differences = 0,
+        seasonal_ma = 2) %>%
+  set_engine(engine = "arima") %>%
+  fit(Value ~ date, data = training(splits))
+
+
+# Model 2: arima_boost ----
+model_fit_arima_boosted <- arima_boost(
+  min_n = 1,
+  learn_rate = 0.015
+) %>%
+  set_engine(engine = "auto_arima_xgboost") %>%
+  fit(Value ~ date + as.numeric(date) + factor(month(date, label = TRUE), ordered = F),
+      data = training(splits))
+
+# Model 3: ets ----
+model_fit_ets <- exp_smoothing() %>%
+  set_engine(engine = "ets") %>%
+  fit(Value ~ date, data = training(splits))
+
+# Model 4: prophet ----
+model_fit_prophet <- prophet_reg(seasonality_weekly = TRUE) %>%
+  set_engine(engine = "prophet") %>%
+  fit(Value ~ date, data = training(splits))
+
+# Model 5: lm ----
+model_fit_lm <- linear_reg() %>%
+  set_engine("lm") %>%
+  fit(Value ~ as.numeric(date) + factor(month(date, label = TRUE), ordered = FALSE),
+      data = training(splits))
+
+# Model 6: earth ----
+model_spec_mars <- mars(mode = "regression") %>%  set_engine("earth") 
+
+recipe_spec <- recipe(Value ~ date, data = training(splits)) %>%
+  step_date(date, features = "month", ordinal = FALSE) %>%
+  step_mutate(date_num = as.numeric(date)) %>%
+  step_normalize(date_num) %>%
+  step_rm(date)
+
+wflw_fit_mars <- workflow() %>%
+  add_recipe(recipe_spec) %>%
+  add_model(model_spec_mars) %>%
+  fit(training(splits))
+
+models_tbl <- modeltime_table(
+  model_fit_arima_no_boost,
+  model_fit_arima_boosted,
+  model_fit_arima_52,
+  model_fit_ets,
+  model_fit_prophet,
+  model_fit_lm,
+  wflw_fit_mars
+)
+
+models_tbl
+
+# calibrate
+calibration_tbl <- models_tbl %>%
+  modeltime_calibrate(new_data = train)
+
+calibration_tbl
+
+# test set forecast and accuracy
+calibration_tbl %>%
+  modeltime_forecast(
+    new_data    = testing(splits),
+    actual_data = country,
+  ) %>%
+  plot_modeltime_forecast(
+    .legend_max_width = 25, # For mobile screens
+    .interactive      = interactive,
+    .conf_interval_show = FALSE
+  )
+
+calibration_tbl %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(
+    .interactive = interactive
+  )
+
+refit_tbl <- calibration_tbl %>%
+  modeltime_refit(data = train)
+
+refit_tbl %>%
+  modeltime_forecast(h = "85 weeks", actual_data = country) %>%
+  plot_modeltime_forecast(
+    .legend_max_width = 25, # For mobile screens
+    .interactive      = interactive,
+    .conf_interval_show = FALSE
+  )
+
+ensemble_fit <- refit_tbl %>%
+  ensemble_average(type = "mean")
+
+ensemble_fit
+
+# Calibration
+e.calibration_tbl <- modeltime_table(
+  ensemble_fit
+) %>%
+  modeltime_calibrate(train, quiet = FALSE)
+
+# get split for in-sample forecast
+splits <- initial_time_split(country, prop = 0.8)
+# Forecast vs Test Set
+#par(mfrow = c(2,1))
+
+png("docs/ensemble_models.png")
+calibration_tbl %>%
+  modeltime_forecast(
+    new_data    = testing(splits),
+    actual_data = train,
+  ) %>%
+  plot_modeltime_forecast(
+    .legend_max_width = 25, # For mobile screens
+    .interactive      = interactive,
+    .conf_interval_show = FALSE
+  )
+dev.off()
+
+png("docs/ensemble.png")
+e.calibration_tbl %>%
+  modeltime_forecast(
+    new_data    = testing(splits),
+    actual_data = country
+  ) %>%
+  plot_modeltime_forecast(.interactive = FALSE,
+                          .title = paste0(mtitle,"\n ",stitle), 
+                          .x_lab = x_lab,
+                          .y_lab = y_lab)
+
+dev.off()
+
+#par(mfrow = c(1,1))
+
+e.calibration_tbl %>%
+  modeltime_accuracy() %>% 
+  table_modeltime_accuracy(
+    .interactive = interactive
+  )
+
+e.calibration_tbl %>%
+  modeltime_accuracy() #%>% table()
+
+```
+
+
+# Individual Models
+
+### Using HoltWinters with trend and seasonality (parameters derived from data)
+
+HoltWinters is the best for the test data (ie last 20%)
+```{r holtWinters, eval = TRUE}
+country.hw<- HoltWinters(train.ts)
+country.hw
+
+country.hw.fc <- forecast(country.hw, h = future)
+
+#We see from the plot that the Holt-Winters exponential method is very successful in modelling the seasonal peaks 
+#- level is off for predictions because not taking enough account of the surge
+autoplot(country.ts) +
+  autolayer(country.hw.fc, PI=F, series="forecast") +
+  autolayer(country.hw$fitted[,1], series = " fitted")+
+  ggtitle(paste0("Mortality in ", country_code, " HoltWinter Forecast (0.94, 0, 1)"), 
+          subtitle = stitle) +
+  theme_minimal() +
+  xlab(x_lab) + ylab(y_lab) +
+  guides(colour=guide_legend(title="HoltWinter"))
+ggsave(here("docs", "holtwinter.png"))
+
+
+Acf(na.omit(country.hw.fc$residuals), lag.max = 20)
+Box.test(country.hw.fc$residuals, lag=20, type = "Ljung-Box")
+checkresiduals(country.hw)
+
+print(forecast::accuracy(country.hw.fc, valid.ts))
+
+```
+### Linear regression model ln(y) ~ trend+season
+
+best result on training, worst on test, so overfitted
+and over predicts on test, so penalised more by MAPE
+
+
+```{r linearModel, echo=TRUE}
+
+#https://www.rdocumentation.org/packages/forecast/versions/8.21/topics/tslm
+
+tslm(train.ts~ season+trend, lambda=NULL) %>% forecast(h=future) %>% forecast::accuracy()
+# mape 5.03524
+
+tslm(log(train.ts)~ season+trend, lambda=NULL) %>% forecast(h=future) %>% forecast::accuracy()
+# mape 0.4258694
+
+# final lm model
+country.lm <- tslm(log(train.ts)~ trend + season, lambda=NULL)
+country.lm.fc <- forecast(country.lm,h=future)
+forecast::accuracy(country.lm.fc, valid.ts)
+#  mape: train= 0.4258694, test = 99.9826714
+
+autoplot(country.ts) +
+  autolayer(exp(country.lm$fitted.values), PI=F, series="fitted") +
+  autolayer(exp(country.lm.fc$mean), series = " forecast")+
+  ggtitle(paste0("Mortality in ", country_code, " Linear Regression (ln(y)~s+t)"), 
+          subtitle = stitle) +
+  theme_minimal() +
+  xlab(x_lab) + ylab(y_lab) +
+  guides(colour=guide_legend(title="Linear Regression"))
+
+country.lm
+
+acf(na.omit(country.lm.fc$residuals), lag.max = 20)
+Box.test(country.lm.fc$residuals, lag=20, type = "Ljung-Box")
+ggtsdisplay(country.lm.fc$residuals)
+
+checkresiduals(country.lm)
+
+```
+```{r plotSmooth, eval=TRUE, include=TRUE}
+# can't use default train.ts because returns error for frequency=52
+ets.ts <- ts(country$Value, start=c(startYear,startWeek), frequency=13)
+ets.train.ts <- window(ets.ts, start = c(startYear, startWeek), 
+                                   end = c(startYear, nTrain))
+ets.valid.ts <- window(ets.ts, start = c(startYear, nTrain+1), 
+                   end = c(startYear, nTrain+nValid))
+
+# if use ZZZ don't get any seasonality
+a.ets <- ets(ets.train.ts, model="ZZZ", alpha = NULL)
+a.ets <- ets(ets.train.ts, model="ZZA", alpha = NULL)
+
+# get prediction
+a.ets.fc <- forecast(a.ets, h = future, level = 0)
+a.ets
+autoplot(ets.ts) +
+  autolayer(a.ets.fc, PI=T, series="forecast") +
+  autolayer(a.ets$fitted, series = " fitted")+
+  ggtitle(paste0("Mortality in ", country_code, " ETS Forecast "), 
+          subtitle = stitle) +
+  theme_minimal() +
+  xlab(x_lab) + ylab(y_lab) +
+  guides(colour=guide_legend(title="ETS(M,Ad,A)"))
+
+forecast::accuracy(a.ets.fc, ets.valid.ts)
+```
+
+# Autocorrelation
+The ACF values are all above the threshold.  The ACF of the time series is decreasing slowly, which suggests that it is non-stationary.  
+You can't predict values for non-stationary data.
+
+There is a clear seasonal (and cyclical) effect,
+[@shmueli2016practical]
+
+
+```{r acf, echo=TRUE}
+# look at autocorrelation
+ggAcf(train.ts, lag=20)
+
+ggtsdisplay(train.ts)
+
+``` 
+
+
+## ARIMA
+An AR (autoregressive) model is usually used to model a time series which shows longer term dependencies between successive observations. Intuitively, it makes sense that an AR model could be used to describe the time series of mortality, as we would expect some factors which affect mortality rates in one year to affect those in later years.
+
+
+```{r bestArima, eval=TRUE, include=TRUE}
+tunes <- readRDS(file="data/arimaManualFit.rds")
+
+best <- tunes[tunes$mape==min(tunes$mape),1:6] %>% as.double()
+print(best)
+
+tunes %>% arrange(mape)  %>% head()
+
+# fit best manual arima model
+#MANUAL
+country.am.fc <- (country.am <- arima(train.ts, order = c(best[1:3]), 
+                    seasonal = c(best[4:6]))) %>% forecast()
+
+##AUTO
+country.aa.fc <-(country.aa <- auto.arima(train.ts)) %>% forecast()
+#ARIMA(3,1,0)(0,0,2)[52] 
+
+# accuracy scores
+print(forecast::accuracy(country.am.fc, valid.ts))
+print(forecast::accuracy(country.aa.fc, valid.ts))
+#https://www.educba.com/arima-model-in-r/
+
+```
+
+Plotting the arima model:
+
+```{r arimaResid, eval=TRUE, include=TRUE }
+ggtsdisplay(resid(fit.manual))
+checkresiduals(fit.manual)
+
+ggtsdisplay(resid(fit))
+checkresiduals(fit)
+
+```
+
+```{r compareModels, eval=T, include=T}
+#------------------------------------------------------------------------
+# compare forecasts for individual models
+autoplot(country.ts) +
+  autolayer(country.aa.fc, PI=F, series="Auto") +
+  autolayer(country.am.fc, PI=F, series = "Manual")+
+  autolayer(exp(country.lm.fc$mean), PI=F, series = "log(y)~t+s")+
+  autolayer(country.hw.fc, PI=F, series = "HoltWinters")+
+  ggtitle("Comparison of forecasts", 
+          subtitle = stitle) +
+  theme_minimal() +
+  xlab(x_lab) + ylab(y_lab) +
+  guides(colour=guide_legend(title="Model"))
+
+```
+
+# Appendix 1 - training on pre-COVID data only
+
+```{r covid, eval=TRUE, include=TRUE}
+covid <- length(country[country$YEAR>= 2020,]$date)
+
+nTrain <- length(country.ts) - covid
+train.ts <- window(country.ts, start = c(startYear, startWeek), 
+                   end = c(startYear, nTrain))
+covid.ts <- window(country.ts, start = c(startYear, nTrain+1), 
+                   end = c(startYear, nTrain+covid))
+
+
+# restricting the decomposition to pre-covid changes the shape of the seasonal component slightly and makes the upward trend more pronounced
+covid.ts %>% stl(s.window="periodic") %>% autoplot()
+train.ts %>% stl(s.window="periodic") %>% autoplot()
+
+#summary(fit.lm)
+# adj r^2 = 0.8866
+# significant trend coefficient  2.719e-04
+#fit.lm$coefficients[2]
+
+covid.arima <- auto.arima(train.ts) %>% forecast(covid)
+covid.hw <- HoltWinters(train.ts) %>% forecast(covid)
+covid.lm <-tslm(log(train.ts)~ trend + season, lambda=NULL) %>% forecast(covid)
+
+# plot model forecasts
+autoplot(country.ts) +
+  autolayer(covid.arima, PI=F, series="Arima (1,0,0)(1,1,0)+d") +
+  autolayer(exp(covid.lm$mean), PI=F, series = "log(y)~t+s")+
+  autolayer(covid.hw, PI=F, series = "HoltWinters (0.79,0,1)")+
+  ggtitle("Comparison of forecasts", 
+          subtitle = stitle) +
+  theme_minimal() +
+  xlab(x_lab) + ylab(y_lab) +
+  guides(colour=guide_legend(title="forecast"))
+ggsave(here("docs", "noCovid.png"))
+
+
+```
+All the models fit well to the training data, and are consistent in predicting the mortality that would have been expected in 2020+ if COVID-19 hadn't happened, so they could be used to estimate the excess mortality in the USA due to COVID.
+
+
+```{r endNotes, eval=FALSE, include=FALSE }
+
+__The exercise is worth 60% of your total grade.__
+
+## Analysis of tweets during a political crisis
+
+#(*Hint: be sure that the data folder is in the same folder as this homework RMarkdown file.*)
+#https://www.statisticshowto.com/ljung-box-test/
+```
+`r paste(date(), "\n")`
+__The exercise is worth 60% of your total grade.__
+
+## Analysis of tweets during a political crisis
+
+#(*Hint: be sure that the data folder is in the same folder as this homework RMarkdown file.*)
+
+
+```{r unused, eval = FALSE, include=FALSE}
+unused <- function(){
+}
+```
+refs:
+
+https://github.com/FinYang/tsdl/tree/master
+The Time Series Data Library (TSDL) was created by Rob Hyndman, Professor of Statistics at Monash University, Australia.
+
+https://www.rdocumentation.org/packages/forecast/versions/8.21/topics/tslm
+
+```{r tuneArima, echo=TRUE, eval = FALSE, include=FALSE}
+# fitting the raw data into the arima function
+
+##MANUAL
+fitArima <- function (timeseries, o, s=c(0,0,0)) {
+  tried <- try((fit<-Arima(country.ts, order = o, seasonal = s)),
+             silent = TRUE)
+  if(inherits(tried, "try-error")) {
+    return(NULL)
+  } else {
+    return(fit)
+  }
+}
+
+rangeVals <- 0:2
+# loop through combinations of order and seasonality to find best fit (based on mape)
+tuneArima <- function(timeseries, rv,seas = FALSE) {
+  tbl_colnames <- c("a", "b", "c", "d", "e", "f", "aic", "aicc", "mape")
+  x <- tbl_colnames %>% purrr::map_dfc(~tibble::tibble(!!.x := numeric()))
+  if(seas) {
+    srv <- rv
+  }
+  else {
+    srv <- 0:0
+  }
+  for (a in rv) {
+    for (b in rv) {
+      for (c in rv) {
+        print(paste(a, b,c))
+          for (d in srv) {
+            for (e in srv) {
+              for (f in srv) {
+                fit <- fitArima(timeseries, o = c(a, b, c), s= c(d, e, f))
+                if (is.null(fit)) next
+                x <- x %>% add_row(a = a, b = b, c= c, 
+                                 d=d, e=e, f=f, aic = fit$aic, 
+                                 aicc = fit$aicc, mape = fit$mape)
+            }#f
+          }#e
+        }#d
+      }#c
+    }#b
+  } #a
+  return(x)
+}
+tunes<- tuneArima(country.ts, rangeVals, seas = TRUE)
+
+```
